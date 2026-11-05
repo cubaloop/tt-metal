@@ -88,6 +88,10 @@ void write_binary_to_address(
     const tt::tt_metal::CoreCoord& core,
     uint32_t address);
 
+// True when TT_METAL_QUASAR_MOCK_JIT is set. A Quasar Mock device then builds its firmware and JIT-compiles
+// program kernels; otherwise Mock skips both for Quasar. Read once per process; safe to call concurrently.
+bool quasar_mock_jit_enabled();
+
 namespace internal_ {
 
 void wait_until_cores_done(
