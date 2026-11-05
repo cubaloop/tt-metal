@@ -6,6 +6,9 @@
 
 A test parametrized with these helpers follows the docstring: a dtype, layout or buffer type added to the
 docstring must work, and one the op stops supporting fails until the docstring drops it.
+
+The helpers run while pytest collects. If a docstring can't be read, they return a single case that fails with the
+reason, so the rest of the test module still collects and runs.
 """
 
 import re
@@ -43,36 +46,69 @@ def _list_table_rows(doc, start):
     return rows
 
 
+class UnreadableDocstring(str):
+    """Stands in for a parameter when the docstring can't be read; using it fails the test with the reason."""
+
+
+def _unreadable_params(op, what, error, arity):
+    reason = UnreadableDocstring(f"could not read the {what} from the {op} docstring: {error}")
+    return [pytest.param(*([reason] * arity), id="docstring-unreadable")]
+
+
+def check_readable(*values):
+    """Fail the test if any value stands in for an unreadable docstring."""
+    for value in values:
+        if isinstance(value, UnreadableDocstring):
+            pytest.fail(value)
+
+
 def docstring_dtype_layout_params(op, caption="Supported dtypes and layouts"):
     """One ``pytest.param(dtype, layout)`` per combination in the docstring table that follows ``caption``."""
-    doc = op.__doc__
-    params = []
-    rows = _list_table_rows(doc, doc.index(caption))
-    assert all(len(row) == 2 for row in rows), f"expected two cells per row after '{caption}', got {rows}"
-    for dtypes, layouts in rows[1:]:
-        for dtype_name in dtypes.split(","):
-            for layout_name in layouts.split(","):
-                dtype = getattr(ttnn.DataType, dtype_name.strip())
-                layout = _LAYOUTS[layout_name.strip()]
-                params.append(pytest.param(dtype, layout, id=f"{dtype_name.strip()}-{layout_name.strip()}"))
-    assert params, f"no dtype/layout table after '{caption}' in the {op} docstring"
-    return params
+    try:
+        doc = op.__doc__
+        params = []
+        rows = _list_table_rows(doc, doc.index(caption))
+        assert all(len(row) == 2 for row in rows), f"expected two cells per row after '{caption}', got {rows}"
+        for dtypes, layouts in rows[1:]:
+            for dtype_name in dtypes.split(","):
+                for layout_name in layouts.split(","):
+                    dtype = getattr(ttnn.DataType, dtype_name.strip())
+                    layout = _LAYOUTS[layout_name.strip()]
+                    params.append(pytest.param(dtype, layout, id=f"{dtype_name.strip()}-{layout_name.strip()}"))
+        assert params, f"no dtype/layout table after '{caption}'"
+        return params
+    except Exception as error:
+        return _unreadable_params(op, "dtype/layout table", error, arity=2)
 
 
-def docstring_interleaved_buffer_type_params(op):
-    """One ``pytest.param(buffer_type)`` per buffer type on the docstring's interleaved Memory Support line."""
-    memory_support = op.__doc__.split("Memory Support:", 1)[1]
-    match = re.search(r"interleaved:?\s+(DRAM|L1)(?:\s+(?:and|or)\s+(DRAM|L1))?", memory_support, re.IGNORECASE)
-    assert match, f"no interleaved line under Memory Support in the {op} docstring"
-    return [pytest.param(getattr(ttnn.BufferType, name), id=name) for name in match.groups() if name]
+def docstring_interleaved_buffer_type_params(op, label=None):
+    """One ``pytest.param(buffer_type)`` per buffer type on the docstring's interleaved Memory Support line.
+
+    ``label`` picks the line that starts with it, such as ``"Output"`` when the docstring lists input and output
+    placement on separate lines. By default the first line that mentions interleaved placement is used.
+    """
+    try:
+        memory_support = op.__doc__.split("Memory Support:", 1)[1]
+        lines = [line for line in memory_support.splitlines() if re.search(r"\binterleaved\b", line, re.IGNORECASE)]
+        if label is not None:
+            lines = [line for line in lines if line.strip().lstrip("- ").startswith(label)]
+        line = lines[0]
+        clause = re.split(r";|\.\s", line.split("nterleaved", 1)[1])[0]
+        names = re.findall(r"\b(DRAM|L1)\b", clause)
+        assert names, f"no buffer type on the interleaved line: {line.strip()!r}"
+        return [pytest.param(getattr(ttnn.BufferType, name), id=name) for name in dict.fromkeys(names)]
+    except Exception as error:
+        return _unreadable_params(op, "interleaved Memory Support line", error, arity=1)
 
 
 def interleaved_memory_config(buffer_type):
+    check_readable(buffer_type)
     return ttnn.MemoryConfig(ttnn.TensorMemoryLayout.INTERLEAVED, buffer_type)
 
 
 def torch_input(shape, dtype, seed=0):
     """Random values that ``dtype`` can hold. Block floats get float32 values, which they quantize."""
+    check_readable(dtype)
     torch.manual_seed(seed)
     if dtype == ttnn.bfloat16:
         return torch.rand(shape, dtype=torch.bfloat16)
