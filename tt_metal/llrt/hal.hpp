@@ -99,7 +99,7 @@ enum class HalL1MemAddrType : uint8_t {
     FABRIC_CONNECTION_LOCK,
     ETH_PTP_TRACE,            // Runtime FW entry/exit PTP stamps (Blackhole only)
     FABRIC_KERNEL_HEARTBEAT,  // Fabric router heartbeat (Quasar only)
-    ETH_LINK,                 // This core's and its link peer's HSIO tile, written before launch (Quasar only)
+    ETH_LINK,                 // Ethernet-link slot, written before launch (Quasar only)
     COUNT                     // Keep this last so it always indicates number of enum options
 };
 
