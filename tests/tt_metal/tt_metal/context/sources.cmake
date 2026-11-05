@@ -12,6 +12,7 @@ if(TT_UMD_BUILD_GRENDEL_JTAG)
         APPEND
         UNIT_TESTS_CONTEXT_SMOKE_SOURCES
         test_mimir_emu.cpp
+        test_keraunos_eth_send.cpp
         test_mimir_backend.cpp
     )
 endif()
