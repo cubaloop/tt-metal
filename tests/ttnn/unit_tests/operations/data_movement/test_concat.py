@@ -1381,3 +1381,142 @@ def test_concat_dtype_uint8_sharded_s2s_tiled(device):
     ]
     got = ttnn.to_torch(ttnn.concat(ttnn_inputs, dim=3, memory_config=out_cfg).cpu().to(ttnn.ROW_MAJOR_LAYOUT))
     assert torch.equal(got, torch.cat(torch_inputs, dim=3))
+
+
+# The tests below check claims made in the ttnn.concat docstring.
+
+
+def _docstring_tensor(shape, layout, device, memory_config=None, dtype=ttnn.bfloat16):
+    kwargs = {} if memory_config is None else {"memory_config": memory_config}
+    return ttnn.from_torch(torch.rand(shape), dtype=dtype, layout=layout, device=device, **kwargs)
+
+
+def _l1_sharded(memory_layout, grid, shard_shape, orientation=ttnn.ShardOrientation.ROW_MAJOR):
+    return ttnn.MemoryConfig(memory_layout, ttnn.BufferType.L1, ttnn.ShardSpec(grid, shard_shape, orientation))
+
+
+_GRID_A = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 1))})
+_GRID_B = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(1, 0), ttnn.CoreCoord(1, 1))})
+_HEIGHT = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
+_WIDTH = ttnn.TensorMemoryLayout.WIDTH_SHARDED
+
+
+def test_concat_dim_defaults_to_zero(device):
+    inputs = [torch.rand(2, 32, 64).bfloat16() for _ in range(2)]
+    output = ttnn.concat([ttnn.from_torch(x, layout=ttnn.TILE_LAYOUT, device=device) for x in inputs])
+    assert_equal(torch.concat(inputs, dim=0), ttnn.to_torch(output))
+
+
+@pytest.mark.parametrize("layout", [ttnn.ROW_MAJOR_LAYOUT, ttnn.TILE_LAYOUT], ids=["row_major", "tile"])
+@pytest.mark.parametrize("num_inputs", [1, 2])
+def test_concat_default_memory_config_is_dram_interleaved(num_inputs, layout, device):
+    inputs = [torch.rand(1, 1, 32, 64).bfloat16() for _ in range(num_inputs)]
+    output = ttnn.concat(
+        [ttnn.from_torch(x, layout=layout, device=device, memory_config=ttnn.L1_MEMORY_CONFIG) for x in inputs],
+        dim=2,
+    )
+    assert output.memory_config().memory_layout == ttnn.TensorMemoryLayout.INTERLEAVED
+    assert output.memory_config().buffer_type == ttnn.BufferType.DRAM
+    assert_equal(torch.concat(inputs, dim=2), ttnn.to_torch(output))
+
+
+@pytest.mark.parametrize(
+    "shape_b, layout_a, layout_b, expected_layout",
+    [
+        ((1, 1, 32, 64), ttnn.TILE_LAYOUT, ttnn.ROW_MAJOR_LAYOUT, ttnn.TILE_LAYOUT),
+        ((1, 1, 32, 64), ttnn.ROW_MAJOR_LAYOUT, ttnn.TILE_LAYOUT, ttnn.ROW_MAJOR_LAYOUT),
+        ((1, 1, 20, 64), ttnn.TILE_LAYOUT, ttnn.ROW_MAJOR_LAYOUT, ttnn.ROW_MAJOR_LAYOUT),
+    ],
+    ids=["tile_first", "row_major_first", "row_major_not_tile_aligned"],
+)
+def test_concat_interleaved_mixed_layouts(shape_b, layout_a, layout_b, expected_layout, device):
+    a, b = torch.rand(1, 1, 32, 64).bfloat16(), torch.rand(shape_b).bfloat16()
+    output = ttnn.concat(
+        [ttnn.from_torch(a, layout=layout_a, device=device), ttnn.from_torch(b, layout=layout_b, device=device)],
+        dim=2,
+    )
+    assert output.layout == expected_layout
+    assert_equal(torch.concat([a, b], dim=2), ttnn.to_torch(output))
+
+
+@pytest.mark.parametrize("tile_first", [True, False])
+def test_concat_padded_tile_requires_all_tile(tile_first, device, expect_error):
+    padded = _docstring_tensor((1, 1, 20, 64), ttnn.TILE_LAYOUT, device)
+    row_major = _docstring_tensor((1, 1, 32, 64), ttnn.ROW_MAJOR_LAYOUT, device)
+    with expect_error(RuntimeError, "expected all input tensors to be in tile layout"):
+        ttnn.concat([padded, row_major] if tile_first else [row_major, padded], dim=2)
+
+
+@pytest.mark.parametrize("layout", [ttnn.ROW_MAJOR_LAYOUT, ttnn.TILE_LAYOUT], ids=["row_major", "tile"])
+def test_concat_mixed_dtypes_rejected(layout, device, expect_error):
+    a = _docstring_tensor((1, 1, 32, 64), layout, device, dtype=ttnn.bfloat16)
+    b = _docstring_tensor((1, 1, 32, 64), layout, device, dtype=ttnn.float32)
+    with expect_error(RuntimeError, "All Tensors should have same dtypes"):
+        ttnn.concat([a, b], dim=2)
+
+
+@pytest.mark.parametrize("sharded_first", [True, False])
+def test_concat_mixed_sharded_and_interleaved_rejected(sharded_first, device, expect_error):
+    sharded = _docstring_tensor((1, 1, 64, 32), ttnn.ROW_MAJOR_LAYOUT, device, _l1_sharded(_HEIGHT, _GRID_A, (32, 32)))
+    interleaved = _docstring_tensor((1, 1, 64, 32), ttnn.ROW_MAJOR_LAYOUT, device, ttnn.DRAM_MEMORY_CONFIG)
+    with expect_error(RuntimeError, "All tensors must be sharded or all must be interleaved"):
+        ttnn.concat(
+            [sharded, interleaved] if sharded_first else [interleaved, sharded],
+            dim=3,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+
+@pytest.mark.parametrize(
+    "layout_b, memory_config_b, message",
+    [
+        (ttnn.ROW_MAJOR_LAYOUT, _l1_sharded(_HEIGHT, _GRID_B, (32, 32)), "Sharded tensors must have the same grid"),
+        (
+            ttnn.ROW_MAJOR_LAYOUT,
+            _l1_sharded(_HEIGHT, _GRID_A, (32, 32), ttnn.ShardOrientation.COL_MAJOR),
+            "Sharded tensors must have the same shard orientation",
+        ),
+        (
+            ttnn.ROW_MAJOR_LAYOUT,
+            _l1_sharded(_WIDTH, _GRID_A, (64, 16)),
+            "Sharded tensors must have the same memory layout",
+        ),
+        (ttnn.TILE_LAYOUT, _l1_sharded(_HEIGHT, _GRID_A, (32, 32)), "All Tensors should have same layouts"),
+    ],
+    ids=["grid", "orientation", "scheme", "layout"],
+)
+def test_concat_sharded_inputs_must_match(layout_b, memory_config_b, message, device, expect_error):
+    a = _docstring_tensor((1, 1, 64, 32), ttnn.ROW_MAJOR_LAYOUT, device, _l1_sharded(_HEIGHT, _GRID_A, (32, 32)))
+    b = _docstring_tensor((1, 1, 64, 32), layout_b, device, memory_config_b)
+    with expect_error(RuntimeError, message):
+        ttnn.concat([a, b], dim=3, memory_config=_l1_sharded(_HEIGHT, _GRID_A, (32, 64)))
+
+
+@pytest.mark.parametrize(
+    "strategy, shape, input_shard, output_shard, grid_end, dim",
+    [
+        (ttnn.ShardStrategy.BLOCK, (1, 1, 64, 64), (32, 32), (32, 64), (1, 1), 3),
+        (ttnn.ShardStrategy.WIDTH, (1, 1, 32, 64), (32, 32), (64, 32), (1, 0), 2),
+    ],
+    ids=["block_sharded", "width_sharded"],
+)
+def test_concat_groups_rejected_on_l1_non_height_sharded(
+    strategy, shape, input_shard, output_shard, grid_end, dim, device, expect_error
+):
+    grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(*grid_end))})
+
+    def sharded(shard_shape):
+        return ttnn.create_sharded_memory_config(
+            shard_shape, core_grid=grid, strategy=strategy, use_height_and_width_as_shard_shape=True
+        )
+
+    inputs = [_docstring_tensor(shape, ttnn.ROW_MAJOR_LAYOUT, device, sharded(input_shard)) for _ in range(2)]
+    with expect_error(RuntimeError, "Groups > 1 is only supported on height-sharded tensors"):
+        ttnn.concat(inputs, dim=dim, memory_config=sharded(output_shard), groups=2)
+
+
+@pytest.mark.parametrize("layout", [ttnn.ROW_MAJOR_LAYOUT, ttnn.TILE_LAYOUT], ids=["row_major", "tile"])
+def test_concat_groups_ignored_for_interleaved_inputs(layout, device):
+    inputs = [torch.rand(1, 1, 32, 64).bfloat16() for _ in range(2)]
+    output = ttnn.concat([ttnn.from_torch(x, layout=layout, device=device) for x in inputs], dim=3, groups=2)
+    assert_equal(torch.concat(inputs, dim=3), ttnn.to_torch(output))

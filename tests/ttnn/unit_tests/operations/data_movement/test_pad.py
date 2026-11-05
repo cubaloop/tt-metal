@@ -2214,3 +2214,99 @@ def test_pad_codegen_auto_keeps_execution_controls_on_native(device, controls):
     assert torch.equal(output, expected)
     msg = "auto routed a pad with an execution control to codegen"
     assert device.num_program_cache_entries() == entries_before, msg
+
+
+# The tests below check claims made in the ttnn.pad docstring.
+
+
+@pytest.mark.parametrize("shape", [(6, 8), (2, 6, 8), (2, 1, 2, 6, 8)], ids=["rank2", "rank3", "rank5"])
+def test_pad_host_row_major(shape):
+    x = torch.rand(shape).bfloat16()
+    input_tensor = ttnn.from_torch(x, ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+    padding = [(0, 0)] * (len(shape) - 2) + [(1, 2), (0, 3)]
+    output = ttnn.pad(input_tensor, padding, 2.0)
+
+    assert not ttnn.is_tensor_storage_on_device(output)
+    assert_tensors_equal(torch.nn.functional.pad(x, (0, 3, 1, 2), value=2.0), ttnn.to_torch(output))
+
+
+@pytest.mark.xfail(strict=True, reason="host pad of a rank-4 tensor grows only padded_shape, not the logical shape")
+def test_pad_host_row_major_rank4():
+    x = torch.rand(1, 2, 6, 8).bfloat16()
+    input_tensor = ttnn.from_torch(x, ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+    output = ttnn.pad(input_tensor, [(0, 0), (0, 0), (1, 2), (0, 3)], 2.0)
+
+    assert list(output.shape) == [1, 2, 9, 11]
+    assert_tensors_equal(torch.nn.functional.pad(x, (0, 3, 1, 2), value=2.0), ttnn.to_torch(output))
+
+
+def test_pad_host_tile_layout_returned_unpadded():
+    input_tensor = ttnn.from_torch(torch.rand(1, 1, 32, 32).bfloat16(), ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+    output = ttnn.pad(input_tensor, [(0, 0), (0, 0), (0, 32), (0, 32)], 1.0)
+
+    assert list(output.shape) == [1, 1, 32, 32]
+    assert list(output.padded_shape) == [1, 1, 32, 32]
+
+
+def test_pad_host_rank_gt4_last_three_dims_only(expect_error):
+    x = torch.rand(2, 2, 3, 4, 8).bfloat16()
+    input_tensor = ttnn.from_torch(x, ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+
+    output = ttnn.pad(input_tensor, ((0, 0), (0, 0), (1, 0), (0, 2), (0, 3)), 1.0)
+    assert_tensors_equal(torch.nn.functional.pad(x, (0, 3, 0, 2, 1, 0), value=1.0), ttnn.to_torch(output))
+
+    with expect_error(RuntimeError, "only supports padding on the lowest 3 dimensions for host tensors with rank > 4"):
+        ttnn.pad(input_tensor, ((0, 0), (0, 1), (0, 0), (0, 0), (0, 0)), 1.0)
+
+
+@pytest.mark.parametrize("layout", [ttnn.TILE_LAYOUT, ttnn.ROW_MAJOR_LAYOUT], ids=["tile", "row_major"])
+def test_pad_int32_value_rounds_through_float32(layout, device):
+    torch.manual_seed(0)
+    x = torch.randint(0, 100, (1, 1, 32, 32), dtype=torch.int32)
+    input_tensor = ttnn.from_torch(x, ttnn.int32, layout=layout, device=device)
+
+    exact = ttnn.to_torch(ttnn.pad(input_tensor, [(0, 0), (0, 0), (0, 0), (0, 32)], 2**24))
+    rounded = ttnn.to_torch(ttnn.pad(input_tensor, [(0, 0), (0, 0), (0, 0), (0, 32)], 2**24 + 1))
+
+    assert_tensors_equal(x, exact[..., :32])
+    assert torch.all(exact[..., 32:] == 2**24)
+    assert_tensors_equal(x, rounded[..., :32])
+    assert torch.all(rounded[..., 32:] == 2**24)
+
+
+@pytest.mark.parametrize("layout", [ttnn.TILE_LAYOUT, ttnn.ROW_MAJOR_LAYOUT], ids=["tile", "row_major"])
+@pytest.mark.parametrize("memory_config", [ttnn.DRAM_MEMORY_CONFIG, ttnn.L1_MEMORY_CONFIG], ids=["dram", "l1"])
+def test_pad_default_memory_config_follows_input(memory_config, layout, device):
+    torch.manual_seed(0)
+    x = torch.rand(1, 1, 32, 32).bfloat16()
+    input_tensor = ttnn.from_torch(x, ttnn.bfloat16, layout=layout, device=device, memory_config=memory_config)
+    output = ttnn.pad(input_tensor, [(0, 0), (0, 0), (0, 32), (0, 32)], 1.0)
+
+    assert output.memory_config() == memory_config
+    assert_tensors_equal(torch.nn.functional.pad(x, (0, 32, 0, 32), value=1.0), ttnn.to_torch(output))
+
+
+@pytest.mark.xfail(strict=True, reason="#57354: a FLOAT32 ROW_MAJOR pad value is packed as two bfloat16s")
+@pytest.mark.parametrize("use_multicore", [True, False])
+def test_pad_row_major_float32_nonzero_value(use_multicore, device):
+    torch.manual_seed(0)
+    x = torch.rand(1, 1, 32, 32, dtype=torch.float32)
+    input_tensor = ttnn.from_torch(x, ttnn.float32, layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
+    output = ttnn.pad(input_tensor, [(0, 0), (0, 0), (0, 32), (0, 32)], 3.0, use_multicore=use_multicore)
+    assert_tensors_equal(torch.nn.functional.pad(x, (0, 32, 0, 32), value=3.0), ttnn.to_torch(output))
+
+
+@pytest.mark.xfail(strict=True, reason="#57354: the single-core ROW_MAJOR factory packs every pad value as bfloat16")
+@pytest.mark.parametrize(
+    "ttnn_dtype, torch_dtype",
+    [(ttnn.int32, torch.int32), (ttnn.uint32, torch.int32), (ttnn.uint16, torch.int16)],
+    ids=["int32", "uint32", "uint16"],
+)
+def test_pad_row_major_single_core_integer_nonzero_value(ttnn_dtype, torch_dtype, device):
+    torch.manual_seed(0)
+    x = torch.randint(0, 100, (1, 1, 32, 32)).to(torch_dtype)
+    input_tensor = ttnn.from_torch(x, ttnn_dtype, layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
+    output = ttnn.pad(input_tensor, [(0, 0), (0, 0), (0, 32), (0, 32)], 5, use_multicore=False)
+    assert_tensors_equal(
+        torch.nn.functional.pad(x.to(torch.int64), (0, 32, 0, 32), value=5), ttnn.to_torch(output).to(torch.int64)
+    )

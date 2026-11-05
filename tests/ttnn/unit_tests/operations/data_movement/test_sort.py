@@ -1786,3 +1786,83 @@ def test_sort_tied_values_indices_are_a_permutation(descending, device):
     ), f"indices out of range [0, {n}): min={int(indices.min())}, max={int(indices.max())}"
     unique_count = indices.unique().numel()
     assert unique_count == n, f"{n - unique_count} duplicated indices"
+
+
+# The tests below check claims made in the ttnn.sort docstring.
+
+
+def test_uint16_input_uint16_preallocated_index_rejected(device, expect_error):
+    shape = [TILE_HEIGHT, 2 * TILE_WIDTH]
+    input_tensor = ttnn.from_torch(
+        torch.randint(0, 1000, shape, dtype=torch.int32), dtype=ttnn.uint16, layout=ttnn.TILE_LAYOUT, device=device
+    )
+    out_values = ttnn.zeros(shape, dtype=ttnn.uint16, device=device, layout=ttnn.TILE_LAYOUT)
+    out_indices = ttnn.zeros(shape, dtype=ttnn.uint16, device=device, layout=ttnn.TILE_LAYOUT)
+    with expect_error(RuntimeError, "must be UINT32 when input dtype is FLOAT32 or UINT16"):
+        ttnn.sort(input_tensor, dim=-1, out=(out_values, out_indices))
+
+
+def _dram_sharded_memory_config(memory_layout, shard_shape):
+    grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(1, 0))})
+    return ttnn.MemoryConfig(
+        memory_layout, ttnn.BufferType.DRAM, ttnn.ShardSpec(grid, shard_shape, ttnn.ShardOrientation.ROW_MAJOR)
+    )
+
+
+@pytest.mark.parametrize("sharded_side", ["input", "output"])
+@pytest.mark.parametrize("layout", [ttnn.TILE_LAYOUT, ttnn.ROW_MAJOR_LAYOUT], ids=["tile", "row_major"])
+@pytest.mark.parametrize(
+    "memory_layout, shape, shard_shape",
+    [
+        (ttnn.TensorMemoryLayout.HEIGHT_SHARDED, [64, 64], [32, 64]),
+        (ttnn.TensorMemoryLayout.WIDTH_SHARDED, [32, 128], [32, 64]),
+    ],
+    ids=["height", "width"],
+)
+def test_sort_dram_sharded(memory_layout, shape, shard_shape, layout, sharded_side, device):
+    torch.manual_seed(0)
+    memory_config = _dram_sharded_memory_config(memory_layout, shard_shape)
+    input_tensor = torch.randn(shape, dtype=torch.bfloat16)
+    ttnn_input = ttnn.from_torch(
+        input_tensor,
+        ttnn.bfloat16,
+        layout=layout,
+        device=device,
+        memory_config=memory_config if sharded_side == "input" else ttnn.DRAM_MEMORY_CONFIG,
+    )
+    values, indices = ttnn.sort(ttnn_input, dim=-1, memory_config=None if sharded_side == "input" else memory_config)
+
+    for output in (values, indices):
+        assert output.memory_config().memory_layout == memory_layout
+        assert output.memory_config().buffer_type == ttnn.BufferType.DRAM
+    torch_values, _ = torch.sort(input_tensor, dim=-1)
+    assert_equal(torch_values, ttnn.to_torch(values))
+    assert_equal(torch_values, torch.gather(input_tensor, -1, ttnn.to_torch(indices).to(torch.int64)))
+
+
+def test_sort_dram_block_sharded_output_rejected(device, expect_error):
+    ttnn_input = ttnn.from_torch(
+        torch.randn([64, 128], dtype=torch.bfloat16), ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
+    )
+    grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 0))})
+    dram_block = ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        ttnn.BufferType.DRAM,
+        ttnn.ShardSpec(grid, [64, 128], ttnn.ShardOrientation.ROW_MAJOR),
+    )
+    with expect_error(RuntimeError, "don't support DRAM block sharding"):
+        ttnn.sort(ttnn_input, dim=-1, memory_config=dram_block)
+
+
+@pytest.mark.xfail(strict=True, reason="sort ignores an interleaved memory_config when dim is not the last dimension")
+def test_sort_memory_config_non_last_dim(device):
+    ttnn_input = ttnn.from_torch(
+        torch.randn([64, 64], dtype=torch.bfloat16),
+        ttnn.bfloat16,
+        layout=ttnn.TILE_LAYOUT,
+        device=device,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+    values, indices = ttnn.sort(ttnn_input, dim=0, memory_config=ttnn.L1_MEMORY_CONFIG)
+    assert values.memory_config().buffer_type == ttnn.BufferType.L1
+    assert indices.memory_config().buffer_type == ttnn.BufferType.L1

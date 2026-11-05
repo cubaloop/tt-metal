@@ -651,3 +651,106 @@ def test_gather_rank_mismatch(input_shape, index_shape, device, expect_error):
     )
     with expect_error(RuntimeError, "same number of dimensions"):
         ttnn.gather(ttnn_input, -1, index=ttnn_index)
+
+
+# The tests below check claims made in the ttnn.gather docstring.
+
+
+@pytest.mark.parametrize("layout", [ttnn.TILE_LAYOUT, ttnn.ROW_MAJOR_LAYOUT], ids=["tile", "row_major"])
+def test_gather_sparse_grad_true_raises(layout, device, expect_error):
+    ttnn_input = ttnn.from_torch(
+        torch.randn([1, 1, 32, 64], dtype=torch.bfloat16), ttnn.bfloat16, layout=layout, device=device
+    )
+    ttnn_index = ttnn.from_torch(
+        torch.randint(0, 64, [1, 1, 32, 32], dtype=torch.int32), ttnn.uint32, layout=layout, device=device
+    )
+    with expect_error(RuntimeError, "[Ss]parse gradient is not supported"):
+        ttnn.gather(ttnn_input, -1, index=ttnn_index, sparse_grad=True)
+
+
+@pytest.mark.parametrize(
+    "input_layout, index_layout",
+    [(ttnn.TILE_LAYOUT, ttnn.ROW_MAJOR_LAYOUT), (ttnn.ROW_MAJOR_LAYOUT, ttnn.TILE_LAYOUT)],
+    ids=["tile_input_row_major_index", "row_major_input_tile_index"],
+)
+def test_gather_mixed_layouts_raise(input_layout, index_layout, device, expect_error):
+    ttnn_input = ttnn.from_torch(
+        torch.randn([1, 1, 32, 64], dtype=torch.bfloat16), ttnn.bfloat16, layout=input_layout, device=device
+    )
+    ttnn_index = ttnn.from_torch(
+        torch.randint(0, 64, [1, 1, 32, 32], dtype=torch.int32), ttnn.uint32, layout=index_layout, device=device
+    )
+    with expect_error(RuntimeError, "must have the same layout"):
+        ttnn.gather(ttnn_input, -1, index=ttnn_index)
+
+
+@pytest.mark.parametrize("layout", [ttnn.TILE_LAYOUT, ttnn.ROW_MAJOR_LAYOUT], ids=["tile", "row_major"])
+def test_gather_int32_index_raises(layout, device, expect_error):
+    ttnn_input = ttnn.from_torch(
+        torch.randn([1, 1, 32, 64], dtype=torch.bfloat16), ttnn.bfloat16, layout=layout, device=device
+    )
+    ttnn_index = ttnn.from_torch(
+        torch.randint(0, 64, [1, 1, 32, 32], dtype=torch.int32), ttnn.int32, layout=layout, device=device
+    )
+    with expect_error(RuntimeError, "[Ii]ndex tensor must be of type UINT32 or UINT16"):
+        ttnn.gather(ttnn_input, -1, index=ttnn_index)
+
+
+@pytest.mark.parametrize("dim", [-1, 0])
+@pytest.mark.parametrize(
+    "ttnn_dtype, torch_dtype, low, high",
+    [
+        (ttnn.uint16, torch.int16, 0, 2**15),
+        (ttnn.uint32, torch.int32, 0, 2**31 - 1),
+        (ttnn.int32, torch.int32, -(2**31), 2**31 - 1),
+    ],
+    ids=["uint16", "uint32", "int32"],
+)
+def test_gather_integer_input_tile(ttnn_dtype, torch_dtype, low, high, dim, device):
+    torch.manual_seed(0)
+    input_shape, index_shape = [64, 128], [32, 96]
+    input = torch.randint(low, high, input_shape, dtype=torch.int64)
+    index = torch.randint(0, input_shape[dim], index_shape, dtype=torch.int64)
+
+    ttnn_input = ttnn.from_torch(input.to(torch_dtype), ttnn_dtype, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_index = ttnn.from_torch(index.to(torch.int32), ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=device)
+    output = ttnn.gather(ttnn_input, dim, index=ttnn_index)
+
+    assert output.dtype == ttnn_dtype
+    assert list(output.shape) == index_shape
+    assert_equal(torch.gather(input, dim, index).to(torch_dtype), ttnn.to_torch(output))
+
+
+@pytest.mark.xfail(strict=True, reason="gather does not write `out` when dim is not the last dimension")
+def test_gather_preallocated_output_non_last_dim(device):
+    torch.manual_seed(0)
+    input = torch.randn([64, 128], dtype=torch.bfloat16)
+    index = torch.randint(0, 64, [32, 128], dtype=torch.int64)
+
+    ttnn_input = ttnn.from_torch(input, ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_index = ttnn.from_torch(index.to(torch.int32), ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_out = ttnn.from_torch(torch.zeros([32, 128], dtype=torch.bfloat16), layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn.gather(ttnn_input, 0, index=ttnn_index, out=ttnn_out)
+
+    assert_equal(torch.gather(input, 0, index), ttnn.to_torch(ttnn_out))
+
+
+@pytest.mark.xfail(strict=True, reason="gather ignores memory_config when dim is not the last dimension")
+def test_gather_memory_config_non_last_dim(device):
+    torch.manual_seed(0)
+    input = torch.randn([64, 128], dtype=torch.bfloat16)
+    index = torch.randint(0, 64, [32, 128], dtype=torch.int64)
+
+    ttnn_input = ttnn.from_torch(
+        input, ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.L1_MEMORY_CONFIG
+    )
+    ttnn_index = ttnn.from_torch(
+        index.to(torch.int32),
+        ttnn.uint32,
+        layout=ttnn.TILE_LAYOUT,
+        device=device,
+        memory_config=ttnn.L1_MEMORY_CONFIG,
+    )
+    output = ttnn.gather(ttnn_input, 0, index=ttnn_index, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+    assert output.memory_config().buffer_type == ttnn.BufferType.DRAM
