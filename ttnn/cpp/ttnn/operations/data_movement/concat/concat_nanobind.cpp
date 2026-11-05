@@ -36,7 +36,7 @@ void bind_concat(nb::module_& mod) {
 
         Keyword Args:
             memory_config (ttnn.MemoryConfig, optional): Memory configuration of the output tensor. Defaults to `None`, which gives a DRAM interleaved output.
-            output_tensor (ttnn.Tensor, optional): Not supported: passing a tensor raises an error. Defaults to `None`.
+            output_tensor (ttnn.Tensor, optional): Must be `None`. Defaults to `None`.
             groups (int, optional): When `groups` is set to a value greater than 1, the inputs are split into N `groups` partitions, and elements are interleaved from each group into the output tensor. Each group is processed independently, and elements from each group are concatenated in an alternating pattern based on the number of groups. This is useful for recombining grouped convolution outputs during residual concatenation. Defaults to `1`. Currently, groups > `1` is only supported for a width concat of two height-sharded tensors in L1.
             sub_core_grids (ttnn.CoreRangeSet, optional): Sub-core grid to use when the inputs and the output are interleaved (L1 or DRAM). If provided, the concatenation will run on the specified sub-core grid instead of the full compute grid. Defaults to `None`.
 

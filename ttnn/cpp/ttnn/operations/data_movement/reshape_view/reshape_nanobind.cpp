@@ -55,10 +55,10 @@ void bind_reshape_view_operation(nb::module_& mod) {
 
             Keyword Args:
                 memory_config (ttnn.MemoryConfig, optional): Memory configuration of the output tensor. Defaults to `None`, which matches the input tensor's memory configuration. If ``memory_config`` specifies a sharded layout without ``shard_spec``, the input tensor's ``shard_spec`` is used as the seed grid (layout should match the input).
-                pad_value (float or int, optional): Value to fill the output tensor's tile padding with when the reshape moves data. Defaults to `None`, which leaves the padding unspecified, except for ``BFLOAT8_B`` and ``BFLOAT4_B`` outputs, whose padding is filled with 0. For ``FLOAT32`` tensors, pass a float: an int is taken as the float's bit pattern.
-                reshape_tile_mode (ttnn.TileReshapeMapMode, optional): Currently has no effect: ``RECREATE`` behaves like ``CACHE``. Defaults to `CACHE`. This keyword is named ``reshape_tile_mode`` on all overloads; the small-vector (tuple/list) shape overload previously used the name ``recreate_mapping_tensor`` for the same option, so update callers to ``reshape_tile_mode``.
-                sub_core_grids (ttnn.CoreRangeSet, optional): Specifies sub-core grid ranges for advanced core selection control. Defaults to `None`, which uses all the cores in the device.
-                skip_padding_fill (bool, optional): If `True`, ``pad_value`` is ignored and tile padding is left as-is. Defaults to `False`, which applies ``pad_value`` when one is given. This option is silently ignored for block-float (``BFLOAT8_B``, ``BFLOAT4_B``) outputs, because the block-float typecast computes a shared exponent across each 16-element sub-block, and unfilled padding would corrupt logical values in straddling sub-blocks; the fill always runs in that case.
+                pad_value (float or int, optional): Value to fill the output tensor's tile padding with when the reshape moves data. Defaults to `None`, which leaves the padding unspecified, except for ``BFLOAT8_B`` and ``BFLOAT4_B`` outputs, whose padding is filled with 0. For ``FLOAT32`` tensors, pass a float.
+                reshape_tile_mode (ttnn.TileReshapeMapMode, optional): ``CACHE`` and ``RECREATE`` give the same result. Defaults to `CACHE`.
+                sub_core_grids (ttnn.CoreRangeSet, optional): Specifies sub-core grid ranges for advanced core selection control, for interleaved input and output. ``BFLOAT8_B`` and ``BFLOAT4_B`` tensors must leave it as `None`. Defaults to `None`, which uses all the cores in the device.
+                skip_padding_fill (bool, optional): If `True`, tile padding is left as-is. Defaults to `False`, which applies ``pad_value`` when one is given. ``BFLOAT8_B`` and ``BFLOAT4_B`` outputs always have their padding filled.
 
             Returns:
                 ttnn.Tensor: the output tensor with the new shape.
@@ -78,17 +78,15 @@ void bind_reshape_view_operation(nb::module_& mod) {
                    * - UINT16
                      - TILE, ROW_MAJOR
 
-                ``UINT16`` reshapes that move data run only on the codegen path, which is available on Wormhole B0 and
-                Blackhole: input and output interleaved in DRAM or L1, TILE tiles padded only in the last two dims
-                (ROW_MAJOR input unpadded), no explicit ``pad_value`` on a padded TILE output, and only when one of its
-                programs fits L1; otherwise the call fails.
+                ``UINT16`` reshapes that move data need Wormhole B0 or Blackhole, input and output interleaved in DRAM or
+                L1, TILE tiles padded only in the last two dims (ROW_MAJOR input unpadded), no explicit ``pad_value`` on
+                a padded TILE output, and enough L1 for one of the reshape programs.
 
-                ``BFLOAT8_B`` and ``BFLOAT4_B`` reshapes that move data go through a ``BFLOAT16`` typecast and do not
-                support ``sub_core_grids``.
+                ``BFLOAT8_B`` and ``BFLOAT4_B`` reshapes that move data go through a ``BFLOAT16`` typecast.
 
             Memory Support:
                 - Interleaved: DRAM and L1
-                - Sharded: HEIGHT_SHARDED, WIDTH_SHARDED and BLOCK_SHARDED input and output; ``sub_core_grids`` is not supported with sharded tensors
+                - Sharded: HEIGHT_SHARDED, WIDTH_SHARDED and BLOCK_SHARDED input and output
                 - ND sharded: supported through a DRAM-interleaved intermediate
         )doc";
 
