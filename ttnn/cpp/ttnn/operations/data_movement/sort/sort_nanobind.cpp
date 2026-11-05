@@ -31,7 +31,7 @@ void bind_sort_operation(nb::module_& mod) {
             stable (bool, optional): If `True`, ensures the original order of equal elements is preserved. Defaults to `False`. With `stable=False` the returned indices are a valid permutation (no duplicates inside tie groups, no out-of-range indices), but which of several equal elements comes first is unspecified. Known exception: on the single-core path (sort dimension padded to at most 2048), an input containing the padding value (`-inf` descending / `+inf` ascending, or `0` / `65535` for `uint16`) can still emit padding indices past the logical row. `float32` inputs have `-0.0` canonicalized to `+0.0` in the returned values with `stable=True` on every factory (the two zeros form one tie class, ordered by index as in PyTorch), and with `stable=False` on the cross-core path and on padded multi-core DRAM sorts; bit-exact consumers of signed zeros (`copysign`, `1/x`, `signbit`) see `+0.0` there.
 
         Keyword Args:
-            memory_config (ttnn.MemoryConfig, optional): Specifies the memory configuration for the output tensor. Defaults to `None`. When `dim` is not the last dimension, an interleaved `memory_config` is ignored and the outputs keep the input tensor's memory configuration.
+            memory_config (ttnn.MemoryConfig, optional): Specifies the memory configuration for the output tensor. Defaults to `None`.
             out (Tuple[ttnn.Tensor, ttnn.Tensor], optional): Preallocated output tensors for the sorted values and indices. Defaults to `None`. The index tensor must be UINT32 for FLOAT32 and UINT16 inputs, and UINT16 or UINT32 for BFLOAT16 inputs.
 
         Returns:

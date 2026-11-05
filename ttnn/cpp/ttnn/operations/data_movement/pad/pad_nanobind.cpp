@@ -22,7 +22,7 @@ namespace ttnn::operations::data_movement::detail {
 
 void bind_pad(nb::module_& mod) {
     const auto* doc = R"doc(
-        Returns a padded tensor, with a specified value at the specified location. If the input tensor is on host, the pad will be performed on host, and if its on device it will be performed on device. Padding on host needs ROW_MAJOR layout: a TILE host tensor is returned unpadded. A rank-4 host tensor only gets a larger padded shape; its logical shape does not change.
+        Returns a padded tensor, with a specified value at the specified location. If the input tensor is on host, the pad will be performed on host, and if its on device it will be performed on device. Padding on host needs ROW_MAJOR layout.
         Any rank of tensor is supported. For rank > 4, leading dimensions are padded via a reshape path before the 4D device kernel; on host, a tensor of rank > 4 can be padded only in its last 3 dimensions.
 
         A second overload pads to an explicit shape instead: ``ttnn.pad(input_tensor, output_padded_shape, input_tensor_start, value)``,
@@ -56,10 +56,6 @@ void bind_pad(nb::module_& mod) {
 
             TILE layout does not support front padding: every "before" value must be 0. Depending on the execution
             path, ``BFLOAT8_B`` input may be padded through a ``BFLOAT16`` typecast.
-
-            A non-zero ``value`` is not padded exactly for ``FLOAT32`` ROW_MAJOR input, for ``INT32``, ``UINT32``
-            and ``UINT16`` ROW_MAJOR input with ``use_multicore=False``, or for ``FLOAT32`` TILE input with
-            ``use_multicore=False``.
 
         Memory Support:
             - Interleaved: DRAM and L1
