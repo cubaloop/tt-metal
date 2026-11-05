@@ -2661,7 +2661,7 @@ __attribute__((optimize("Os"))) void teardown(
             notify_subordinate_routers(
                 edm_channels_mask,
                 local_handshake_master_eth_chan,
-                static_cast<uint32_t>(reinterpret_cast<uintptr_t>(termination_signal_ptr)),
+                router_l1_offset(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(termination_signal_ptr))),
                 *termination_signal_ptr);
         }
     }
@@ -2692,7 +2692,7 @@ __attribute__((optimize("Os"))) void initialize_state_for_txq1_active_mode() {
         reinterpret_cast<volatile uint32_t*>(local_receiver_ack_counters_base_address)[i] = 0;
         reinterpret_cast<volatile uint32_t*>(local_receiver_completion_counters_base_address)[i] = 0;
     }
-    eth_txq_reg_write(receiver_txq_id, ETH_TXQ_DATA_PACKET_ACCEPT_AHEAD, DEFAULT_NUM_ETH_TXQ_DATA_PACKET_ACCEPT_AHEAD);
+    eth_txq_set_data_packet_accept_ahead(receiver_txq_id, DEFAULT_NUM_ETH_TXQ_DATA_PACKET_ACCEPT_AHEAD);
 }
 __attribute__((optimize("Os"))) void initialize_state_for_txq1_active_mode_sender_side() {
     for (size_t i = 0; i < NUM_SENDER_CHANNELS; i++) {
@@ -2751,6 +2751,9 @@ void kernel_main() {
 #if !defined(FABRIC_2D_VC1_ACTIVE)
     POSTCODE(tt::tt_fabric::EDMStatus::INITIALIZATION_STARTED);
 #endif
+#if defined(ARCH_QUASAR)
+    internal_::cce_eth::check_on_cce0();
+#endif
 
     const auto* routing_table_l1 =
         reinterpret_cast<tt_l1_ptr tt::tt_fabric::routing_l1_info_t*>(router_l1(ROUTING_TABLE_BASE));
@@ -2762,7 +2765,7 @@ void kernel_main() {
     // Initialize fabric telemetry early to ensure valid values before router starts
     initialize_fabric_telemetry();
 
-    eth_txq_reg_write(sender_txq_id, ETH_TXQ_DATA_PACKET_ACCEPT_AHEAD, DEFAULT_NUM_ETH_TXQ_DATA_PACKET_ACCEPT_AHEAD);
+    eth_txq_set_data_packet_accept_ahead(sender_txq_id, DEFAULT_NUM_ETH_TXQ_DATA_PACKET_ACCEPT_AHEAD);
     asm volatile("nop");
     static_assert(
         receiver_txq_id == sender_txq_id || receiver_txq_id == 1,
@@ -3382,9 +3385,9 @@ void kernel_main() {
                 // This still send to self even though with single risc core case, but no side effects
                 constexpr uint32_t exclude_eth_chan = std::numeric_limits<uint32_t>::max();
                 notify_subordinate_routers(
-                    edm_channels_mask, exclude_eth_chan, edm_local_sync_ptr_addr, num_local_edms);
+                    edm_channels_mask, exclude_eth_chan, router_l1_offset(edm_local_sync_ptr_addr), num_local_edms);
             } else {
-                notify_master_router(local_handshake_master_eth_chan, edm_local_sync_ptr_addr);
+                notify_master_router(local_handshake_master_eth_chan, router_l1_offset(edm_local_sync_ptr_addr));
                 wait_for_notification<ENABLE_RISC_CPU_DATA_CACHE>(
                     edm_local_sync_ptr_addr, num_local_edms, termination_signal_ptr);
             }
@@ -3404,7 +3407,7 @@ void kernel_main() {
                 notify_subordinate_routers(
                     edm_channels_mask,
                     local_handshake_master_eth_chan,
-                    edm_status_ptr_addr,
+                    router_l1_offset(edm_status_ptr_addr),
                     tt::tt_fabric::EDMStatus::READY_FOR_TRAFFIC);
             }
         }

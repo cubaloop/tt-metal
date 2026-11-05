@@ -20,6 +20,8 @@ namespace internal_::cce_eth {
 
 using namespace overlay;
 
+// Every send reprograms this buffer, which is also the NOC layer's read buffer: a router hart issues no NOC reads
+// (CM-084).
 constexpr CmdBuf kCmdBuf = CMDBUF_1;
 constexpr uint32_t kTrid = CMDBUF_1_TRID_STATIC;
 // Request VCs 12-15 reach the Ethernet backends: TX queue q is VC 12 + q.
@@ -28,6 +30,8 @@ constexpr uint32_t kNumTxqs = 4;
 constexpr uint64_t kMaxBytesInPacket = 0x1000;
 // AXI_OPT_1.src_protocol of an inline write: the source register carries the data.
 constexpr uint8_t kInlineSrcProtocol = 4;
+// An inline Ethernet write lands 8 bytes at an 8-byte-aligned address and carries 52 significant bits (CM-092).
+constexpr uint32_t kInlineValueBits = 52;
 
 // Keraunos local address of an HSIO tile's CCE SRAM: base + tile * stride + offset. The command buffer takes this
 // view on both ends (chippy metal compat, CM-001). The Keraunos-E100 spec (v1.0.9, ch. 12) says a CCE issues Grendel
@@ -35,6 +39,35 @@ constexpr uint8_t kInlineSrcProtocol = 4;
 constexpr uint64_t kHsioLocalBase = 0x20000000;
 constexpr uint64_t kHsioTileStride = 0x4000000;
 constexpr uint64_t kHsioCceSramOffset = 0x2800000;
+
+// CCE-local PF_CTRL_TILE_ID, a strap: bit 0 is the CCE, bits 3:1 the HSIO tile.
+constexpr uintptr_t kPfCtrlTileIdAddr = 0x03200008;
+
+// What halt() posts to the router postcode word (fabric_postcode_ptr in tunneling.h, which includes this header).
+enum class HaltCode : uint32_t {
+    RemoteRegMisaligned = 0xCCEEF001,    // detail: the address
+    RemoteRegValueTooWide = 0xCCEEF002,  // detail: the value's upper 32 bits
+    NotOnCce0 = 0xCCEEF003,              // detail: PF_CTRL_TILE_ID
+};
+
+// Stops this hart on a fault that ASSERT, compiled out without watcher, would let pass: stores @p detail to the first
+// fabric scratch word and @p code to the router postcode word, where the host reads them, then asserts and spins. Not
+// a trap: the CCE firmware installs no trap vector.
+[[noreturn, gnu::cold, gnu::noinline]] inline void halt(HaltCode code, uint32_t detail) {
+    fabric_scratch_ptr[0] = detail;
+    POSTCODE(code);
+    ASSERT(false);
+    while (true) {
+    }
+}
+
+// Halts unless this hart is on CCE0, the only CCE sram_local_addr() handles. Reads an MMIO register: call once.
+inline void check_on_cce0() {
+    const uint32_t tile_id = *reinterpret_cast<const volatile uint32_t*>(kPfCtrlTileIdAddr);
+    if ((tile_id & 0x1) != 0) {
+        halt(HaltCode::NotOnCce0, tile_id);
+    }
+}
 
 // MEM_IERISC_FABRIC_ETH_LINK_BASE, as the host writes it.
 struct EthLink {
@@ -87,9 +120,15 @@ FORCE_INLINE void send_bytes(uint32_t q_num, uint32_t src, uint32_t dest, uint32
     issue_cmdbuf<kCmdBuf>();
 }
 
-// Write the 32-bit @p val to @p dest on the link peer as an inline write on TX queue @p q_num; returns once issued.
-// Assumes !txq_busy(q_num). Unverified on hardware: compat's inline Ethernet writes are 8 bytes.
-FORCE_INLINE void send_word(uint32_t q_num, uint32_t dest, uint32_t val) {
+// Write @p val to the 8-byte-aligned @p dest on the link peer as an inline write on TX queue @p q_num; returns once
+// issued. Assumes !txq_busy(q_num). Halts if @p dest is misaligned or @p val is not below 2^kInlineValueBits.
+FORCE_INLINE void send_dword(uint32_t q_num, uint32_t dest, uint64_t val) {
+    if (dest % sizeof(val) != 0) {
+        halt(HaltCode::RemoteRegMisaligned, dest);
+    }
+    if ((val >> kInlineValueBits) != 0) {
+        halt(HaltCode::RemoteRegValueTooWide, static_cast<uint32_t>(val >> 32));
+    }
     setup_send(q_num, dest);
     set_src_cmdbuf<kCmdBuf>(val);
     set_len_cmdbuf<kCmdBuf>(sizeof(val));

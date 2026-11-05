@@ -8,9 +8,6 @@
 #include <stdint.h>
 
 #include "tt_eth_ss_regs.h"
-#if defined(ARCH_QUASAR)
-#include "api/debug/assert.h"
-#endif
 
 #define ETH_WRITE_REG(addr, val) ((*((volatile uint32_t*)(uintptr_t)((addr)))) = (val))
 #define ETH_READ_REG(addr) (*((volatile uint32_t*)(uintptr_t)((addr))))
@@ -26,18 +23,22 @@ inline uint32_t bytes_to_eth_words(uint32_t num_bytes) {
     return (num_bytes + (ETH_WORD_SIZE_BYTES - 1)) >> BYTES_TO_ETH_WORD_SHIFT;
 }
 
+#if !defined(ARCH_QUASAR)
+// A Keraunos CCE sends through its command buffer and has no TX-queue registers.
 inline void eth_txq_reg_write(uint32_t qnum, uint32_t offset, uint32_t val) {
-#if defined(ARCH_QUASAR)
-    // A Keraunos CCE sends through its command buffer and has no TX-queue registers. The one register the router
-    // sets, ETH_TXQ_DATA_PACKET_ACCEPT_AHEAD, has no Keraunos equivalent (CM-061), so the write is dropped.
-    ASSERT(offset == ETH_TXQ_DATA_PACKET_ACCEPT_AHEAD);
-#else
     ETH_WRITE_REG(ETH_TXQ0_REGS_START + (qnum * ETH_TXQ_REGS_SIZE) + offset, val);
-#endif
 }
 
 inline uint32_t eth_txq_reg_read(uint32_t qnum, uint32_t offset) {
     return ETH_READ_REG(ETH_TXQ0_REGS_START + (qnum * ETH_TXQ_REGS_SIZE) + offset);
+}
+#endif
+
+// Sets how many data packets TX queue @p qnum accepts ahead. Keraunos has no such setting (CM-061): no effect there.
+inline void eth_txq_set_data_packet_accept_ahead(uint32_t qnum, uint32_t num_packets) {
+#if !defined(ARCH_QUASAR)
+    eth_txq_reg_write(qnum, ETH_TXQ_DATA_PACKET_ACCEPT_AHEAD, num_packets);
+#endif
 }
 
 void eth_reg_write(uint32_t addr, uint32_t val) { ETH_WRITE_REG(addr, val); }
