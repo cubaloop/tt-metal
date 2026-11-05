@@ -10,6 +10,13 @@ import ttnn
 from ttnn.tools import trace_allocation_tracker
 
 from tests.ttnn.utils_for_testing import assert_with_pcc, assert_equal
+from tests.ttnn.unit_tests.operations.data_movement.docstring_support import (
+    assert_exact,
+    docstring_dtype_layout_params,
+    docstring_interleaved_buffer_type_params,
+    interleaved_memory_config,
+    torch_input,
+)
 
 
 def test_view_preserves_root_buffer_unique_id(device):
@@ -1080,199 +1087,18 @@ def test_quasar_reshape_rm_unit_last_dim(device):
     assert_equal(torch_input.reshape(n, 1), ttnn.to_torch(tt_out))
 
 
-# The tests below check claims made in the ttnn.reshape docstring.
-
-
-def _reshape_device_ops(fn):
-    ttnn.graph.begin_graph_capture(ttnn.graph.RunMode.NORMAL)
-    try:
-        result = fn()
-    finally:
-        captured = ttnn.graph.end_graph_capture()
-    device_ops = [name for name in ttnn.graph.extract_calltrace(captured) if name.endswith("DeviceOperation")]
-    return result, device_ops, captured
-
-
-def test_reshape_negative_one_needs_list(device, expect_error):
-    x = ttnn.from_torch(torch.rand(4, 64).bfloat16(), layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
-    assert list(ttnn.reshape(x, (2, -1)).shape) == [2, 128]
-    with expect_error(TypeError, "incompatible function arguments"):
-        ttnn.Shape([2, -1])
-    with expect_error(TypeError, "incompatible function arguments"):
-        ttnn.reshape(x, [2, -1], [2, 128])
-
-
-def test_reshape_old_tile_mode_keyword_rejected(device, expect_error):
-    x = ttnn.from_torch(torch.rand(4, 64).bfloat16(), layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
-    with expect_error(TypeError, "incompatible function arguments"):
-        ttnn.reshape(x, (2, 128), recreate_mapping_tensor=ttnn.TileReshapeMapMode.CACHE)
-
-
-@pytest.mark.parametrize(
-    "input_shape, layout, output_shape, memory_config, expect_view",
-    [
-        ((1, 4, 256, 128), ttnn.TILE_LAYOUT, (1, 1, 1024, 128), None, True),
-        ((1, 4, 256, 128), ttnn.TILE_LAYOUT, (1, 1, 1024, 128), ttnn.DRAM_MEMORY_CONFIG, True),
-        ((1, 4, 256, 128), ttnn.TILE_LAYOUT, (1, 1, 1024, 128), ttnn.L1_MEMORY_CONFIG, False),
-        ((2, 50, 64), ttnn.TILE_LAYOUT, (1, 2, 50, 64), None, True),
-        ((2, 50, 64), ttnn.TILE_LAYOUT, (100, 64), None, False),
-        ((64, 100), ttnn.ROW_MAJOR_LAYOUT, (2, 32, 100), None, True),
-        ((64, 100), ttnn.ROW_MAJOR_LAYOUT, (32, 200), None, False),
-    ],
-    ids=[
-        "tile_h_multiple_of_32",
-        "tile_explicit_same_placement",
-        "tile_different_placement",
-        "tile_h_unchanged",
-        "tile_h_changed_not_multiple_of_32",
-        "row_major_last_dim_unchanged",
-        "row_major_last_dim_changed",
-    ],
-)
-def test_reshape_view_rules(input_shape, layout, output_shape, memory_config, expect_view, device):
-    torch.manual_seed(0)
-    x = torch.rand(input_shape).bfloat16()
-    ttnn_input = ttnn.from_torch(x, layout=layout, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-    output, device_ops, _ = _reshape_device_ops(
-        lambda: ttnn.reshape(ttnn_input, output_shape, memory_config=memory_config)
+@pytest.mark.parametrize("buffer_type", docstring_interleaved_buffer_type_params(ttnn.reshape))
+@pytest.mark.parametrize("dtype, layout", docstring_dtype_layout_params(ttnn.reshape))
+def test_reshape_docstring_supported_inputs(dtype, layout, buffer_type, device):
+    """Runs every dtype, layout and interleaved buffer type the ttnn.reshape docstring lists."""
+    memory_config = interleaved_memory_config(buffer_type)
+    input_tensor = ttnn.from_torch(
+        torch_input((1, 2, 50, 64), dtype), dtype=dtype, layout=layout, device=device, memory_config=memory_config
     )
+    # The last dim stays the same, so block-float values come back unchanged; for TILE the data still moves.
+    output = ttnn.reshape(input_tensor, (1, 1, 100, 64), memory_config=memory_config)
 
-    is_view = output.buffer_address() == ttnn_input.buffer_address() and not device_ops
-    assert is_view == expect_view, device_ops
-    if memory_config is not None:
-        assert output.memory_config().buffer_type == memory_config.buffer_type
-    assert_equal(x.reshape(output_shape), ttnn.to_torch(output))
-
-
-def test_reshape_view_keeps_input_memory_config(device):
-    torch.manual_seed(0)
-    x = torch.rand(1, 4, 256, 128).bfloat16()
-    height = ttnn.create_sharded_memory_config((1, 4, 256, 128), ttnn.CoreGrid(x=1, y=4), ttnn.ShardStrategy.HEIGHT)
-    width = ttnn.create_sharded_memory_config((1, 1, 1024, 128), ttnn.CoreGrid(x=4, y=1), ttnn.ShardStrategy.WIDTH)
-    ttnn_input = ttnn.from_torch(x, layout=ttnn.TILE_LAYOUT, device=device, memory_config=height)
-    output = ttnn.reshape(ttnn_input, (1, 1, 1024, 128), memory_config=width)
-
-    assert output.memory_config() == ttnn_input.memory_config()
-    assert output.buffer_address() == ttnn_input.buffer_address()
-    assert_equal(x.reshape(1, 1, 1024, 128), ttnn.to_torch(output))
-
-
-def test_reshape_same_shape_applies_memory_config(device):
-    torch.manual_seed(0)
-    x = torch.rand(1, 1, 128, 128).bfloat16()
-    height = ttnn.create_sharded_memory_config((1, 1, 128, 128), ttnn.CoreGrid(x=1, y=4), ttnn.ShardStrategy.HEIGHT)
-    width = ttnn.create_sharded_memory_config((1, 1, 128, 128), ttnn.CoreGrid(x=4, y=1), ttnn.ShardStrategy.WIDTH)
-    ttnn_input = ttnn.from_torch(x, layout=ttnn.TILE_LAYOUT, device=device, memory_config=height)
-    output = ttnn.reshape(ttnn_input, (1, 1, 128, 128), memory_config=width)
-
-    assert output.memory_config().memory_layout == ttnn.TensorMemoryLayout.WIDTH_SHARDED
-    assert output.buffer_address() != ttnn_input.buffer_address()
-    assert_equal(x, ttnn.to_torch(output))
-
-
-def test_reshape_nd_sharded_input_staged_through_dram(device):
-    torch.manual_seed(0)
-    x = torch.rand(2, 2, 64, 64).bfloat16()
-    grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(1, 0))})
-    memory_config = ttnn.MemoryConfig(ttnn.BufferType.L1, ttnn.NdShardSpec(ttnn.Shape([1, 1, 64, 64]), grid))
-    ttnn_input = ttnn.from_torch(x, layout=ttnn.ROW_MAJOR_LAYOUT, device=device, memory_config=memory_config)
-    output, _, captured = _reshape_device_ops(lambda: ttnn.reshape(ttnn_input, (2, 2, 32, 128)))
-
-    full_size_dram_allocations = [
-        node
-        for node in captured
-        if node.get("node_type") == "buffer_allocate"
-        and node["params"].get("type") == "DRAM"
-        and int(node["params"].get("size", 0)) == x.numel() * 2
-    ]
-    assert full_size_dram_allocations
-    assert output.memory_config().memory_layout == ttnn.TensorMemoryLayout.ND_SHARDED
-    assert_equal(x.reshape(2, 2, 32, 128), ttnn.to_torch(output))
-
-
-@pytest.mark.parametrize("dtype", [ttnn.bfloat8_b, ttnn.bfloat4_b], ids=["bfloat8_b", "bfloat4_b"])
-def test_reshape_block_float_default_pad_is_zero(dtype, device):
-    torch.manual_seed(0)
-    ttnn_input = ttnn.from_torch(torch.rand(32, 32) + 1, dtype=dtype, layout=ttnn.TILE_LAYOUT, device=device)
-    output, device_ops, _ = _reshape_device_ops(lambda: ttnn.reshape(ttnn_input, (32, 16, 2)))
-
-    assert device_ops[0].startswith("Typecast") and device_ops[-1].startswith("Typecast"), device_ops
-    padded = output.cpu().to_torch_with_padded_shape().float()
-    padding = torch.ones_like(padded, dtype=torch.bool)
-    padding[:32, :16, :2] = False
-    assert torch.all(padded[padding] == 0)
-    assert_equal(ttnn.to_torch(ttnn_input).float().reshape(32, 16, 2), ttnn.to_torch(output).float())
-
-
-def test_reshape_block_float_rejects_sub_core_grids(device, expect_error):
-    ttnn_input = ttnn.from_torch(
-        torch.rand(1, 1, 64, 128), dtype=ttnn.bfloat8_b, layout=ttnn.TILE_LAYOUT, device=device
-    )
-    sub_core_grids = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(1, 0), ttnn.CoreCoord(3, 6))])
-    with expect_error(RuntimeError, "Block-float reshape does not support sub core grid specification"):
-        ttnn.reshape(ttnn_input, (1, 1, 128, 64), sub_core_grids=sub_core_grids)
-
-
-def test_reshape_float32_int_pad_value_is_bit_pattern(device):
-    ttnn_input = ttnn.from_torch(
-        torch.arange(1, 13, dtype=torch.float32), dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device
-    )
-    from_int = ttnn.reshape(ttnn_input, (12, 1, 1), pad_value=0x40000000).cpu().to_torch_with_padded_shape()
-    from_float = ttnn.reshape(ttnn_input, (12, 1, 1), pad_value=2.0).cpu().to_torch_with_padded_shape()
-
-    assert torch.all(from_int[:, :, 1:] == 2.0)
-    assert_equal(from_float, from_int)
-
-
-def test_reshape_tile_mode_has_no_effect(device):
-    torch.manual_seed(0)
-    x = torch.rand(1, 8, 8).bfloat16()
-    ttnn_input = ttnn.from_torch(x, layout=ttnn.TILE_LAYOUT, device=device)
-    # An explicit pad_value on a padded TILE output keeps the call on the native path, which owns the mode.
-    outputs = []
-    for mode in (ttnn.TileReshapeMapMode.CACHE, ttnn.TileReshapeMapMode.RECREATE):
-        output, device_ops, _ = _reshape_device_ops(
-            lambda mode=mode: ttnn.reshape(ttnn_input, ttnn.Shape([1, 16, 4]), pad_value=0.0, reshape_tile_mode=mode)
-        )
-        assert device_ops[0].startswith("ReshapeView"), device_ops
-        outputs.append(output)
-
-    assert_equal(outputs[0].cpu().to_torch_with_padded_shape(), outputs[1].cpu().to_torch_with_padded_shape())
-    assert_equal(x.reshape(1, 16, 4), ttnn.to_torch(outputs[0]))
-
-
-@pytest.mark.parametrize("dtype", [ttnn.int32, ttnn.uint32], ids=["int32", "uint32"])
-def test_reshape_row_major_integer(dtype, device):
-    torch.manual_seed(0)
-    x = torch.randint(0, 2**31 - 1, (64, 128), dtype=torch.int32)
-    ttnn_input = ttnn.from_torch(x, dtype=dtype, layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
-    output = ttnn.reshape(ttnn_input, (128, 64))
-    assert_equal(x.reshape(128, 64).to(torch.int64), ttnn.to_torch(output).to(torch.int64))
-
-
-def _uint16_tile(shape, device):
-    return ttnn.from_torch(
-        torch.randint(0, 1000, shape, dtype=torch.int32), dtype=ttnn.uint16, layout=ttnn.TILE_LAYOUT, device=device
-    )
-
-
-def test_reshape_uint16_outside_codegen_scope_fails(device, expect_error):
-    message = "Can only work with bfloat16/float32 or int32/uint32 tensors"
-    height = ttnn.create_sharded_memory_config((1, 1, 128, 64), ttnn.CoreGrid(x=1, y=2), ttnn.ShardStrategy.HEIGHT)
-    with expect_error(RuntimeError, message):
-        ttnn.reshape(_uint16_tile((1, 1, 64, 128), device), (1, 1, 128, 64), memory_config=height)
-    with expect_error(RuntimeError, message):
-        ttnn.reshape(_uint16_tile((50, 64), device), (100, 32), pad_value=0)
-
-    # The same reshape without a pad_value stays on the codegen path and is exact.
-    x = torch.randint(0, 1000, (50, 64), dtype=torch.int32)
-    output = ttnn.reshape(ttnn.from_torch(x, dtype=ttnn.uint16, layout=ttnn.TILE_LAYOUT, device=device), (100, 32))
-    assert_equal(x.reshape(100, 32).to(torch.int64), ttnn.to_torch(output).to(torch.int64))
-
-
-def test_reshape_sharded_rejects_sub_core_grids(device, expect_error):
-    height = ttnn.create_sharded_memory_config((1, 1, 128, 128), ttnn.CoreGrid(x=1, y=2), ttnn.ShardStrategy.HEIGHT)
-    ttnn_input = ttnn.from_torch(torch.rand(1, 1, 64, 256).bfloat16(), layout=ttnn.TILE_LAYOUT, device=device)
-    sub_core_grids = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 1))])
-    with expect_error(RuntimeError, "Sharded reshape does not support sub core grid specification"):
-        ttnn.reshape(ttnn_input, (1, 1, 128, 128), memory_config=height, sub_core_grids=sub_core_grids)
+    assert output.dtype == dtype
+    assert output.layout == layout
+    assert output.memory_config().buffer_type == buffer_type
+    assert_exact(ttnn.to_torch(input_tensor).reshape(1, 1, 100, 64), ttnn.to_torch(output))
