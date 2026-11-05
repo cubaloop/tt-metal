@@ -148,6 +148,62 @@ std::array<uint32_t, 4> quasar_eth_link_slot(const Cluster& cluster, ChipId chip
     return slot;
 }
 
+// System address of HSIO tile 0's CCE SRAM: the tile's global window (0x12_0400_0000) plus the SRAM offset
+// (0x280_0000), Keraunos-E100 Table 14 (docs arch/KERAUNOS-HW-FINDINGS.md Q1). Tiles are keraunos.tile_stride apart.
+constexpr uint64_t k_keraunos_system_sram_base = 0x1206800000ULL;
+
+// The NOC routes (CceNocRoutes, hostdev/cce_spa_routes.h) of Keraunos core `logical_eth` on `chip`, from the chip's
+// SoC descriptor. Each keraunos.cores entry gets a route at its virtual coordinate and one at its Ethernet channel's
+// coordinate in the device's eth_chan_to_noc_xy, (20 + channel, 25). Fatal when the descriptor has no Keraunos window,
+// when `logical_eth` has no keraunos.cores entry, or when the routes do not fit.
+CceNocRoutes quasar_cce_noc_routes(const Cluster& cluster, ChipId chip, const CoreCoord& logical_eth) {
+    const auto& soc = cluster.get_soc_desc(chip);
+    const auto& keraunos = soc.get_arch_descriptor().get_keraunos();
+    TT_FATAL(
+        keraunos.local_window.has_value() && keraunos.tile_stride.has_value(),
+        "Chip {} SoC descriptor has no keraunos local_window and tile_stride",
+        chip);
+    const uint64_t cce_stride = soc.get_arch_descriptor().get_eth_l1_size();
+    const tt::umd::KeraunosCore& self =
+        soc.get_keraunos_core_for_channel(soc.logical_eth_core_to_chan_map.at(logical_eth));
+
+    CceNocRoutes routes{};
+    const auto add_route = [&](uint32_t x, uint32_t y, CceNocRouteKind kind, uint64_t sram_base) {
+        TT_FATAL(
+            routes.num_routes < CCE_NOC_ROUTES_MAX,
+            "Chip {} needs more than {} CCE NOC routes",
+            chip,
+            CCE_NOC_ROUTES_MAX);
+        routes.routes[routes.num_routes++] = {
+            .sram_base = sram_base, .x = static_cast<uint8_t>(x), .y = static_cast<uint8_t>(y), .kind = kind};
+    };
+    for (const auto& core : keraunos.cores) {
+        const uint64_t region = core.hsio * *keraunos.tile_stride + core.cce * cce_stride;
+        const bool is_self = &core == &self;
+        CceNocRouteKind kind = CceNocRouteKind::OTHER_TILE;
+        uint64_t sram_base = k_keraunos_system_sram_base + region;
+        if (is_self) {
+            kind = CceNocRouteKind::THIS_CCE;
+            sram_base = *keraunos.local_window + region;
+        } else if (core.hsio == self.hsio) {
+            kind = CceNocRouteKind::THIS_TILE_OTHER_CCE;
+            sram_base = 0;
+        }
+        const CoreCoord logical = soc.get_logical_ethernet_core_from_physical({core.coord.x, core.coord.y});
+        const CoreCoord virtual_core =
+            cluster.get_virtual_coordinate_from_logical_coordinates(chip, logical, CoreType::ETH);
+        const uint32_t chan = soc.logical_eth_core_to_chan_map.at(logical);
+        add_route(virtual_core.x, virtual_core.y, kind, sram_base);
+        add_route(20 + chan, 25, kind, sram_base);
+        if (is_self) {
+            routes.self_x = static_cast<uint8_t>(virtual_core.x);
+            routes.self_y = static_cast<uint8_t>(virtual_core.y);
+        }
+    }
+    routes.valid = CCE_NOC_ROUTES_VALID;
+    return routes;
+}
+
 // Whether a Mock device of `arch` builds firmware. Quasar Mock skips kernel JIT (ProgramImpl::compile), which is
 // what links against the firmware, so it builds firmware only when TT_METAL_QUASAR_MOCK_JIT lifts that skip.
 // Real silicon devices bypass this check.
@@ -1643,6 +1699,18 @@ void RiscFirmwareInitializer::initialize_and_launch_firmware(tt::ChipId device_i
         }
     }
 
+    // CceNocRoutes sits after the bank-to-NOC staging table, as CceSpaRoutes does on a DRAM core.
+    const auto write_cce_noc_routes =
+        [&](const CoreCoord& logical_eth, const CoreCoord& virtual_core, HalProgrammableCoreType core_type) {
+            const CceNocRoutes routes = quasar_cce_noc_routes(cluster_, device_id, logical_eth);
+            cluster_.write_core_immediate(
+                &routes,
+                sizeof(routes),
+                {static_cast<size_t>(device_id), virtual_core},
+                hal_.get_dev_addr(core_type, HalL1MemAddrType::BANK_TO_NOC_SCRATCH) +
+                    hal_.get_dev_size(core_type, HalL1MemAddrType::BANK_TO_NOC_SCRATCH));
+        };
+
     log_debug(tt::LogMetal, "Initializing active ethernet cores");
     dev_msgs_factory = hal_.get_dev_msgs_factory(HalProgrammableCoreType::ACTIVE_ETH);
     core_info = populate_core_info_msg(device_id, HalProgrammableCoreType::ACTIVE_ETH);
@@ -1674,6 +1742,7 @@ void RiscFirmwareInitializer::initialize_and_launch_firmware(tt::ChipId device_i
                 sizeof(slot),
                 {static_cast<size_t>(device_id), virtual_core},
                 hal_.get_dev_addr(HalProgrammableCoreType::ACTIVE_ETH, HalL1MemAddrType::ETH_LINK));
+            write_cce_noc_routes(eth_core, virtual_core, HalProgrammableCoreType::ACTIVE_ETH);
         }
         initialize_firmware(
             device_id, HalProgrammableCoreType::ACTIVE_ETH, virtual_core, launch_msg.view(), go_msg.view());
@@ -1701,6 +1770,9 @@ void RiscFirmwareInitializer::initialize_and_launch_firmware(tt::ChipId device_i
             hal_.get_dev_addr(
                 llrt::get_core_type(descriptor_->env_impl(), device_id, virtual_core),
                 HalL1MemAddrType::CORE_INFO));
+        if (has_quasar_ethernet) {
+            write_cce_noc_routes(eth_core, virtual_core, HalProgrammableCoreType::IDLE_ETH);
+        }
         initialize_firmware(
             device_id, HalProgrammableCoreType::IDLE_ETH, virtual_core, launch_msg.view(), go_msg.view());
         not_done_cores.insert(virtual_core);

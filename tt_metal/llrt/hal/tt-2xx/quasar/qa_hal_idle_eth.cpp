@@ -6,6 +6,7 @@
 #define COMPILE_FOR_ERISC
 
 #include "tt_align.hpp"
+#include "hostdev/cce_spa_routes.h"
 #include "hostdev/dev_msgs.h"
 #include "hostdevcommon/fabric_telemetry_msgs.h"
 #include "hostdev/realtime_profiler_msgs.h"
@@ -44,6 +45,8 @@ HalCoreInfoType create_eth_mem_map(HalProgrammableCoreType core_type, bool progr
     static_assert(PROCESSOR_COUNT == MEM_IERISC_LOCAL_HARTS);
     static_assert(decltype(DevicePrintMemoryLayout::buffer)::processor_count == PROCESSOR_COUNT);
     static_assert(sizeof(mailboxes_t) <= MEM_IERISC_MAILBOX_SIZE);
+    static_assert(sizeof(CceNocRoutes) <= MEM_IERISC_NOC_ROUTES_SIZE);
+    static_assert(MEM_IERISC_PACKET_HEADER_POOL_SIZE == MEM_PACKET_HEADER_POOL_SIZE);
     static_assert(MEM_IERISC_KERNEL_BASE + MEM_IERISC_KERNEL_SIZE * MEM_IERISC_LOCAL_HARTS <= MEM_IERISC_L1_SIZE);
 
     std::uint32_t max_alignment = std::max(DRAM_ALIGNMENT, L1_ALIGNMENT);
@@ -71,8 +74,11 @@ HalCoreInfoType create_eth_mem_map(HalProgrammableCoreType core_type, bool progr
     mem_map_bases[static_cast<std::size_t>(HalL1MemAddrType::LAUNCH_MSG_BUFFER_RD_PTR)] =
         GET_IERISC_MAILBOX_ADDRESS_HOST(launch_msg_rd_ptr);
     mem_map_bases[static_cast<std::size_t>(HalL1MemAddrType::BANK_TO_NOC_SCRATCH)] = MEM_IERISC_BANK_TO_NOC_SCRATCH;
-    // The control plane writes routing info to every Ethernet core, linked or not, as on Blackhole.
+    // The control plane writes routing info to every Ethernet core, linked or not, as on Blackhole, and the worker
+    // connection table to the idle ones a Keraunos chip runs workers on.
     mem_map_bases[static_cast<std::size_t>(HalL1MemAddrType::ROUTING_TABLE)] = MEM_IERISC_ROUTING_TABLE_BASE;
+    mem_map_bases[static_cast<std::size_t>(HalL1MemAddrType::TENSIX_FABRIC_CONNECTIONS)] =
+        MEM_IERISC_FABRIC_CONNECTIONS_BASE;
     if (linked) {
         mem_map_bases[static_cast<std::size_t>(HalL1MemAddrType::FABRIC_TELEMETRY)] = MEM_IERISC_FABRIC_TELEMETRY_BASE;
         mem_map_bases[static_cast<std::size_t>(HalL1MemAddrType::ROUTER_STATE)] = MEM_IERISC_FABRIC_ROUTER_STATE_BASE;
@@ -100,6 +106,8 @@ HalCoreInfoType create_eth_mem_map(HalProgrammableCoreType core_type, bool progr
     mem_map_sizes[static_cast<std::size_t>(HalL1MemAddrType::LAUNCH_MSG_BUFFER_RD_PTR)] = sizeof(std::uint32_t);
     mem_map_sizes[static_cast<std::size_t>(HalL1MemAddrType::BANK_TO_NOC_SCRATCH)] = MEM_IERISC_BANK_TO_NOC_SIZE;
     mem_map_sizes[static_cast<std::size_t>(HalL1MemAddrType::ROUTING_TABLE)] = MEM_IERISC_ROUTING_TABLE_SIZE;
+    mem_map_sizes[static_cast<std::size_t>(HalL1MemAddrType::TENSIX_FABRIC_CONNECTIONS)] =
+        MEM_IERISC_FABRIC_CONNECTIONS_SIZE;
     if (linked) {
         static_assert(sizeof(::tt::tt_fabric::fabric_telemetry::FabricTelemetry) <= MEM_IERISC_FABRIC_TELEMETRY_SIZE);
         mem_map_sizes[static_cast<std::size_t>(HalL1MemAddrType::FABRIC_TELEMETRY)] = MEM_IERISC_FABRIC_TELEMETRY_SIZE;
