@@ -62,7 +62,7 @@ void bind_slice(nb::module_& mod) {
         Keyword Args:
             memory_config (ttnn.MemoryConfig, optional): Memory configuration for the output tensor. Defaults to `None`, which uses the input tensor's memory configuration.
             output_tensor (ttnn.Tensor, optional): Pre-allocated output tensor. Its shape must match the slice output. Defaults to `None`.
-            pad_value (float, optional): Fill value for the implicit tile padding of a TILE output, for a slice with unit steps whose start indices in the last two dims are multiples of 32. Defaults to `None`, which leaves the padding undefined.
+            pad_value (float, optional): Fill value for the implicit tile padding of a TILE output. It is applied when a unit-step slice, with start indices in the last two dims that are multiples of 32, changes the size of one of the last two dims to a size that is not a multiple of 32. Defaults to `None`, which leaves the padding undefined.
             sub_core_grids (ttnn.CoreRangeSet, optional): sub core grids for the operation. Defaults to `None`.
 
         Returns:
@@ -93,7 +93,7 @@ void bind_slice(nb::module_& mod) {
         Memory Support:
             - Interleaved: DRAM and L1
             - Sharded: HEIGHT_SHARDED, WIDTH_SHARDED and BLOCK_SHARDED input and output; DRAM-sharded input is also accepted with an interleaved output
-            - ND sharded: input and output
+            - ND sharded: input and output, for tensors of rank 2 or more
     )doc";
 
     // TODO: implementing the array version and overloading the nanobind with all the possible array sizes is better
