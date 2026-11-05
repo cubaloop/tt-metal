@@ -45,8 +45,9 @@ void bind_reshape_view_operation(nb::module_& mod) {
                 * ``memory_config``, if given, matches the input in being sharded or interleaved and in DRAM or L1 placement
                 * for TILE layout, the second-to-last dimension does not change, or it is a multiple of 32 in both the input and the new shape
 
-            A view keeps the input's memory configuration. ND sharded tensors are staged through DRAM instead, unless
-            only the logical shape changes.
+            A view keeps the input's memory configuration. If the shape does not change, a ``memory_config`` that
+            differs from the input's is applied with a copy. ND sharded tensors are staged through DRAM instead of
+            viewed, unless only the logical shape changes.
 
             Args:
                 input_tensor (ttnn.Tensor): the input tensor.
