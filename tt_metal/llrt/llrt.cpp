@@ -323,11 +323,6 @@ void write_binary_to_address(
     });
 }
 
-bool quasar_mock_jit_enabled() {
-    static const bool enabled = std::getenv("TT_METAL_QUASAR_MOCK_JIT") != nullptr;
-    return enabled;
-}
-
 namespace internal_ {
 
 namespace {
