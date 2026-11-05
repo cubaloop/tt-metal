@@ -62,7 +62,7 @@ void bind_slice(nb::module_& mod) {
         Keyword Args:
             memory_config (ttnn.MemoryConfig, optional): Memory configuration for the output tensor. Defaults to `None`, which uses the input tensor's memory configuration.
             output_tensor (ttnn.Tensor, optional): Pre-allocated output tensor. Its shape must match the slice output. Defaults to `None`.
-            pad_value (float, optional): Fill value for the implicit tile padding of a TILE output. Defaults to `None`, which leaves the padding undefined. Ignored, with the padding filled with 0, when a step is not 1 or a start index in the last two dims is not tile-aligned.
+            pad_value (float, optional): Fill value for the implicit tile padding of a TILE output, for a slice with unit steps whose start indices in the last two dims are multiples of 32. Defaults to `None`, which leaves the padding undefined.
             sub_core_grids (ttnn.CoreRangeSet, optional): sub core grids for the operation. Defaults to `None`.
 
         Returns:
@@ -85,15 +85,14 @@ void bind_slice(nb::module_& mod) {
                * - BFLOAT8_B
                  - TILE
 
-            Strided slicing (``slice_step != 1``) is not supported for ``BFLOAT8_B`` tensors, and a ``BFLOAT8_B`` slice
-            whose start indices in the last two dims are not tile-aligned returns a ``BFLOAT16`` tensor.
+            Strided slicing (``slice_step != 1``) is not supported for ``BFLOAT8_B`` tensors.
 
             TILE layout tensors must use the standard 32x32 tile, and a pre-allocated ``output_tensor`` must
             carry the same tile as the input.
 
         Memory Support:
             - Interleaved: DRAM and L1
-            - Sharded: HEIGHT_SHARDED, WIDTH_SHARDED and BLOCK_SHARDED input and output; DRAM-sharded input is also accepted, except that a ROW_MAJOR HEIGHT_SHARDED DRAM input with a HEIGHT_SHARDED output raises an error
+            - Sharded: HEIGHT_SHARDED, WIDTH_SHARDED and BLOCK_SHARDED input and output; DRAM-sharded input is also accepted with an interleaved output
             - ND sharded: input and output
     )doc";
 
