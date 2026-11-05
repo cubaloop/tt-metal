@@ -97,8 +97,10 @@ enum class HalL1MemAddrType : uint8_t {
     ETH_FW_MAILBOX,
     TENSIX_FABRIC_CONNECTIONS,
     FABRIC_CONNECTION_LOCK,
-    ETH_PTP_TRACE,  // Runtime FW entry/exit PTP stamps (Blackhole only)
-    COUNT           // Keep this last so it always indicates number of enum options
+    ETH_PTP_TRACE,            // Runtime FW entry/exit PTP stamps (Blackhole only)
+    FABRIC_KERNEL_HEARTBEAT,  // Fabric router heartbeat (Quasar only)
+    ETH_LINK,                 // Ethernet-link slot, written before launch (Quasar only)
+    COUNT                     // Keep this last so it always indicates number of enum options
 };
 
 enum class HalDramMemAddrType : uint8_t {

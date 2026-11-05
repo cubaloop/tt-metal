@@ -538,9 +538,12 @@ FabricEriscDatamoverConfig::FabricEriscDatamoverConfig(
         }
     }
     if (this->arch == tt::ARCH::QUASAR) {
-        // A Quasar hart has two command buffers: writes and atomics share 0 (WR_CMD_BUF), reads use 1.
+        // A Quasar hart has two command buffers: writes and atomics share 0 (WR_CMD_BUF), reads use 1, and on a
+        // Keraunos CCE the Ethernet send takes 1 too (eth_cce_send.h). Forwarding data and sync can share 0 only
+        // because, without stream registers, the sync buffer holds no set_state (fabric_router_adapter.hpp).
         for (uint32_t i = 0; i < builder_config::num_max_receiver_channels; i++) {
             this->receiver_channel_forwarding_data_cmd_buf_ids[i] = FabricEriscDatamoverConfig::WR_CMD_BUF;
+            this->receiver_channel_forwarding_sync_cmd_buf_ids[i] = FabricEriscDatamoverConfig::WR_CMD_BUF;
         }
         for (uint32_t i = 0; i < builder_config::num_max_sender_channels; i++) {
             this->sender_channel_ack_cmd_buf_ids[i] = FabricEriscDatamoverConfig::WR_CMD_BUF;
@@ -762,6 +765,20 @@ FabricEriscDatamoverBuilder::FabricEriscDatamoverBuilder(
     // 1. The channel allocator was created with MAX channel counts
     // 2. Changing config counts would cause emit_ct_args to emit wrong number of args
     // The config stays at MAX, but we pass actual counts to device via compile-time args
+    if (fabric_context.get_cluster().arch() == tt::ARCH::QUASAR) {
+        const auto physical_chip_id =
+            fabric_context.get_control_plane().get_physical_chip_id_from_fabric_node_id(local_fabric_node_id);
+        const auto& keraunos_core =
+            fabric_context.get_cluster().get_soc_desc(physical_chip_id).get_keraunos_core_for_channel(my_eth_channel);
+        // The router's Ethernet send and memory map handle CCE0 only (eth_cce_send.h).
+        TT_FATAL(
+            keraunos_core.cce == 0,
+            "Fabric router on chip {} Ethernet channel {} (HSIO tile {}) would run on CCE{}; only CCE0 is supported",
+            physical_chip_id,
+            my_eth_channel,
+            keraunos_core.hsio,
+            keraunos_core.cce);
+    }
     // Validate injection flags vector size matches the number of sender channels
     TT_FATAL(
         sender_channel_is_traffic_injection_channel_array.size() == config.num_used_sender_channels,

@@ -5,6 +5,7 @@
 #include "risc_firmware_initializer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <chrono>
 #include <future>
@@ -123,16 +124,38 @@ std::optional<uint32_t> dram_channel_for_translated_core(const metal_SocDescript
     return std::nullopt;
 }
 
-// Mock devices reuse the on-disk firmware sources of a real arch's package.
-// We only ship sources for Wormhole and Blackhole today; Quasar mock has
-// no `tt-2xx/trisc.cc` etc. installed at the expected path, so calling
-// build_firmware() against a Quasar mock blows up in cc1plus with
-// "No such file or directory". Real silicon devices always have sources
-// available and bypass this check.
-bool mock_firmware_sources_available_for(tt::ARCH arch) {
+// The Ethernet-link slot (HalL1MemAddrType::ETH_LINK) of linked Quasar Ethernet core `logical_eth` on `chip`, laid out
+// as internal_::cce_eth::EthLink in tt-2xx/quasar/eth_cce_send.h. When the cluster's link table has no peer for the
+// core, the valid word stays 0 and a warning is logged. Fatal when either end has no keraunos.cores entry.
+std::array<uint32_t, 4> quasar_eth_link_slot(const Cluster& cluster, ChipId chip, const CoreCoord& logical_eth) {
+    constexpr uint32_t k_eth_link_valid = 0x4B4E494C;  // kEthLinkValid in eth_cce_send.h
+    const auto& soc = cluster.get_soc_desc(chip);
+    const uint32_t chan = soc.logical_eth_core_to_chan_map.at(logical_eth);
+    std::array<uint32_t, 4> slot{soc.get_keraunos_core_for_channel(chan).hsio, 0, 0, 0};
+    const auto& connections = cluster.get_ethernet_connections();
+    const auto chip_links = connections.find(chip);
+    if (chip_links == connections.end() || !chip_links->second.contains(chan)) {
+        log_warning(
+            tt::LogMetal,
+            "Chip {} Ethernet channel {} has no link peer in this cluster; its Ethernet-link slot is left invalid",
+            chip,
+            chan);
+        return slot;
+    }
+    const auto& [peer_chip, peer_chan] = chip_links->second.at(chan);
+    slot[1] = cluster.get_soc_desc(peer_chip).get_keraunos_core_for_channel(peer_chan).hsio;
+    slot[2] = k_eth_link_valid;
+    return slot;
+}
+
+// Whether a Mock device of `arch` builds firmware. Quasar Mock skips kernel JIT (ProgramImpl::compile), which is
+// what links against the firmware, so it builds firmware only when llrt::quasar_mock_jit_enabled() lifts that skip.
+// Real silicon devices bypass this check.
+bool mock_builds_firmware_for(tt::ARCH arch) {
     switch (arch) {
         case tt::ARCH::WORMHOLE_B0:
         case tt::ARCH::BLACKHOLE: return true;
+        case tt::ARCH::QUASAR: return llrt::quasar_mock_jit_enabled();
         default: return false;
     }
 }
@@ -270,14 +293,13 @@ void RiscFirmwareInitializer::run_async_build_phase(const std::set<tt::ChipId>& 
             // depend on -- without them, JIT-compiling kernels on a mock device fails with
             // "non constant or forward reference address expression". So we run it for mock as
             // well as real devices, with two exceptions:
-            //   1. Mock devices whose arch has no firmware sources packaged (currently Quasar).
-            //      cc1plus would fatal on missing source files; mock kernel JIT on Quasar is not
-            //      yet supported and would require a separate sources fix.
+            //   1. Mock devices of an arch that skips kernel JIT on Mock (Quasar, unless
+            //      TT_METAL_QUASAR_MOCK_JIT is set); see mock_builds_firmware_for.
             //   2. Emule devices on any arch. Emule's kernel JIT uses an x86 toolchain, so the
             //      riscv firmware ELFs are never linked or consumed.
             const bool skip_fw_build = cluster_.get_target_device_type() == tt::TargetDevice::Emule ||
                                        (cluster_.get_target_device_type() == tt::TargetDevice::Mock &&
-                                        !mock_firmware_sources_available_for(cluster_.arch()));
+                                        !mock_builds_firmware_for(cluster_.arch()));
             if (!skip_fw_build) {
                 BuildEnvManager::get_instance(ctx_id).build_firmware(device_id);
             }
@@ -1640,6 +1662,19 @@ void RiscFirmwareInitializer::initialize_and_launch_firmware(tt::ChipId device_i
             hal_.get_dev_addr(
                 llrt::get_core_type(descriptor_->env_impl(), device_id, virtual_core),
                 HalL1MemAddrType::CORE_INFO));
+        if (has_quasar_ethernet) {
+            const auto slot = quasar_eth_link_slot(cluster_, device_id, eth_core);
+            TT_FATAL(
+                hal_.get_dev_size(HalProgrammableCoreType::ACTIVE_ETH, HalL1MemAddrType::ETH_LINK) == sizeof(slot),
+                "HAL Ethernet-link slot is {} B, the host writes {} B",
+                hal_.get_dev_size(HalProgrammableCoreType::ACTIVE_ETH, HalL1MemAddrType::ETH_LINK),
+                sizeof(slot));
+            cluster_.write_core_immediate(
+                slot.data(),
+                sizeof(slot),
+                {static_cast<size_t>(device_id), virtual_core},
+                hal_.get_dev_addr(HalProgrammableCoreType::ACTIVE_ETH, HalL1MemAddrType::ETH_LINK));
+        }
         initialize_firmware(
             device_id, HalProgrammableCoreType::ACTIVE_ETH, virtual_core, launch_msg.view(), go_msg.view());
         if (!hal_.get_eth_fw_is_cooperative()) {
