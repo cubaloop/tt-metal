@@ -85,7 +85,7 @@ void bind_slice(nb::module_& mod) {
                * - BFLOAT8_B
                  - TILE
 
-            Strided slicing (``slice_step != 1``) is not supported for ``BFLOAT8_B`` tensors.
+            ``BFLOAT8_B`` tensors need a ``slice_step`` of 1.
 
             TILE layout tensors must use the standard 32x32 tile, and a pre-allocated ``output_tensor`` must
             carry the same tile as the input.
