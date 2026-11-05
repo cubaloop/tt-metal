@@ -18,15 +18,26 @@ _LAYOUTS = {"TILE": ttnn.TILE_LAYOUT, "ROW_MAJOR": ttnn.ROW_MAJOR_LAYOUT}
 
 
 def _list_table_rows(doc, start):
-    """Cells of each row of the first ``.. list-table::`` at or after ``start``, header row included."""
+    """Cells of each row of the first ``.. list-table::`` at or after ``start``, header row included.
+
+    Blank lines between rows are skipped. The table ends at the first non-blank line that is neither one of its
+    rows nor indented under one, so a list that follows the table is never read as part of it.
+    """
     lines = doc[doc.index(".. list-table::", start) :].splitlines()[1:]
     rows = []
+    row_indent = None
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("* -"):
+        if not stripped:
+            continue
+        indent = len(line) - len(line.lstrip())
+        if stripped.startswith("* -") and row_indent in (None, indent):
+            row_indent = indent
             rows.append([stripped[len("* -") :].strip()])
-        elif stripped.startswith("- ") and rows:
+        elif rows and indent > row_indent and stripped.startswith("- "):
             rows[-1].append(stripped[len("- ") :].strip())
+        elif rows and indent > row_indent:
+            rows[-1][-1] += " " + stripped
         elif rows:
             break
     return rows
@@ -36,7 +47,9 @@ def docstring_dtype_layout_params(op, caption="Supported dtypes and layouts"):
     """One ``pytest.param(dtype, layout)`` per combination in the docstring table that follows ``caption``."""
     doc = op.__doc__
     params = []
-    for dtypes, layouts in _list_table_rows(doc, doc.index(caption))[1:]:
+    rows = _list_table_rows(doc, doc.index(caption))
+    assert all(len(row) == 2 for row in rows), f"expected two cells per row after '{caption}', got {rows}"
+    for dtypes, layouts in rows[1:]:
         for dtype_name in dtypes.split(","):
             for layout_name in layouts.split(","):
                 dtype = getattr(ttnn.DataType, dtype_name.strip())
