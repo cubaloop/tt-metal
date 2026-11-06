@@ -49,8 +49,10 @@ Tensor _addcdiv(
     float value,
     const std::optional<MemoryConfig>& output_mem_config,
     const std::optional<Tensor>& output_tensor) {
+
     TT_FATAL(
-        input_a.storage_type() == StorageType::DEVICE && input_b.storage_type() == StorageType::DEVICE &&
+        input_a.storage_type() == StorageType::DEVICE &&
+            input_b.storage_type() == StorageType::DEVICE &&
             input_c.storage_type() == StorageType::DEVICE,
         "Ternary operation requires input tensors to be on Device.");
 
@@ -62,27 +64,91 @@ Tensor _addcdiv(
         return output_tensor.value();
     };
 
-    Tensor t_factor = ttnn::multiply(input_b, value, std::nullopt, output_mem_config);
-    Tensor t_div = ttnn::div(t_factor, input_c, false, std::nullopt, std::nullopt, output_mem_config);
-    Tensor result = ttnn::add(input_a, t_div, std::nullopt, output_mem_config);
+    Tensor t_factor =
+        ttnn::multiply(input_b, value, std::nullopt, output_mem_config);
 
-    if (result.dtype() == DataType::FLOAT32) {
+    Tensor t_div = ttnn::div(
+        t_factor, input_c, false, std::nullopt, std::nullopt, output_mem_config);
+
+    // Preserve the existing FP32 implementation.
+    if (input_a.dtype() == DataType::FLOAT32) {
+        Tensor result = ttnn::add(input_a, t_div, std::nullopt, output_mem_config);
+        t_factor.deallocate();
+        t_div.deallocate();
         return write_output(result);
     }
 
-    // For non-FP32: 0.5 * inf != inf but 1.7014e+3 and 0/0 = 0
-    // To match Torch behavior after golden normalization, we explicitly
-    // inject an "infinite term" whenever input_c == 0:
-    //   (value * input_b) / 0  ->  sign(input_b) * (value * inf)
-    // If input_b == 0 and input_c ==0: force sign = +1 so the result becomes (value * inf)
-    // Note: We intentionally avoid using sign(t_factor) here, since (value * input_b) can underflow to 0 in BF16.
-    const float signed_inf = value * std::numeric_limits<float>::infinity();  // value * torch.tensor(float("inf"))
+    // Detect zero divisor, including negative zero.
+    Tensor zero_c = ttnn::eqz(input_c, output_mem_config);
+
+    // Determine the sign of the numerator.
     Tensor sign_b = ttnn::sign(input_b, output_mem_config);
-    Tensor sign_or_one = ttnn::where(ttnn::eqz(input_b, output_mem_config), 1.0f, sign_b, output_mem_config);
-    Tensor t_inf = ttnn::multiply(sign_or_one, signed_inf, std::nullopt, output_mem_config);
-    result = ttnn::where(ttnn::eqz(input_c, output_mem_config), t_inf, result, output_mem_config);
+
+    // Preserve the sign of the zero divisor.
+    Tensor sign_c = ttnn::where(
+        ttnn::signbit(input_c, output_mem_config),
+        -1.0f,
+        1.0f,
+        output_mem_config);
+
+    Tensor sign_or_one = ttnn::where(
+        ttnn::eqz(input_b, output_mem_config),
+        1.0f,
+        sign_b,
+        output_mem_config);
+
+    // Construct the signed pole infinity.
+    const float signed_inf =
+        value * std::numeric_limits<float>::infinity();
+
+    Tensor pole_sign = ttnn::multiply(
+        sign_or_one, sign_c, std::nullopt, output_mem_config);
+
+    Tensor t_inf = ttnn::multiply(
+        pole_sign, signed_inf, std::nullopt, output_mem_config);
+
+    // 0/0 and NaN/0 must produce NaN.
+    const float nan_value = std::numeric_limits<float>::quiet_NaN();
+
+    Tensor t_pole = ttnn::where(
+        ttnn::eqz(input_b, output_mem_config),
+        nan_value,
+        t_inf,
+        output_mem_config);
+
+    t_pole = ttnn::where(
+        ttnn::isnan(input_b, output_mem_config),
+        nan_value,
+        t_pole,
+        output_mem_config);
+
+    // Fix the quotient BEFORE adding input_a.
+    Tensor t_fixed_div = ttnn::where(
+        zero_c,
+        t_pole,
+        t_div,
+        output_mem_config);
+
+    // Release intermediate tensors.
+    t_factor.deallocate();
+    t_div.deallocate();
+    sign_b.deallocate();
+    sign_c.deallocate();
+    sign_or_one.deallocate();
+    pole_sign.deallocate();
+    t_inf.deallocate();
+    t_pole.deallocate();
+    zero_c.deallocate();
+
+    // NaN propagation and opposite infinities are now handled by add.
+    Tensor result = ttnn::add(
+        input_a, t_fixed_div, std::nullopt, output_mem_config);
+
+    t_fixed_div.deallocate();
+
     return write_output(result);
 }
+
 
 // Fallback composite implementation for lerp (with scalar weight)
 // lerp(input, end, weight) = start + weight * (end - start)
